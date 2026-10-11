@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Meu Feed</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; background: #000; color: #fff; overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+
+  #feed { height: 100dvh; overflow-y: scroll; scroll-snap-type: y mandatory;
+    overscroll-behavior: contain; scrollbar-width: none; }
+  #feed::-webkit-scrollbar { display: none; }
+
+  .slide { position: relative; height: 100dvh; width: 100%; scroll-snap-align: start;
+    scroll-snap-stop: always; display: flex; align-items: center; justify-content: center;
+    background: #000; overflow: hidden; }
+  .slide video { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .slide video.portrait { object-fit: cover; }
+  @media (min-aspect-ratio: 3/4) { .slide video.portrait { object-fit: contain; } }
+
+  .paused-icon { position: absolute; inset: 0; margin: auto; width: 84px; height: 84px;
+    opacity: 0; transition: opacity .15s; pointer-events: none; }
+  .slide.paused .paused-icon { opacity: .8; }
+
+  .progress { position: absolute; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom) + 0px);
+    height: 3px; background: rgba(255,255,255,.2); }
+  .progress > div { height: 100%; width: 0; background: #fff; }
+
+  .actions { position: fixed; right: 12px; bottom: calc(env(safe-area-inset-bottom) + 90px);
+    display: flex; flex-direction: column; gap: 18px; z-index: 10; }
+  .btn { width: 52px; height: 52px; border-radius: 50%; border: 0; cursor: pointer;
+    background: rgba(0,0,0,.35); color: #fff; display: grid; place-items: center;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  .btn svg { width: 28px; height: 28px; }
+  .btn.add { background: #fe2c55; }
+  .btn:active { transform: scale(.92); }
+
+  .counter { position: fixed; top: calc(env(safe-area-inset-top) + 14px); left: 0; right: 0;
+    text-align: center; font-size: 14px; font-weight: 600; opacity: .7; z-index: 10;
+    pointer-events: none; text-shadow: 0 1px 3px rgba(0,0,0,.6); }
+
+  #empty { position: fixed; inset: 0; display: none; flex-direction: column; gap: 18px;
+    align-items: center; justify-content: center; text-align: center; padding: 24px; }
+  #empty.show { display: flex; }
+  #empty h1 { font-size: 22px; }
+  #empty p { opacity: .65; max-width: 300px; line-height: 1.4; }
+  #empty button { background: #fe2c55; color: #fff; border: 0; border-radius: 8px;
+    padding: 14px 28px; font-size: 16px; font-weight: 600; cursor: pointer; }
+
+  #toast { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    background: rgba(0,0,0,.8); padding: 12px 18px; border-radius: 8px; font-size: 15px;
+    opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; text-align: center; }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="feed"></div>
+
+<div class="counter" id="counter"></div>
+
+<div class="actions" id="actions" hidden>
+  <button class="btn" id="muteBtn" title="Som">
+    <svg id="muteIcon" viewBox="0 0 24 24" fill="currentColor"></svg>
+  </button>
+  <button class="btn" id="delBtn" title="Apagar este vídeo">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 3h6l1 2h4v2H4V5h4l1-2zm-3 6h12l-1 12H7L6 9zm4 2v8h2v-8h-2zm4 0v8h2v-8h-2z"/></svg>
+  </button>
+  <button class="btn add" id="addBtn" title="Adicionar vídeos">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
+  </button>
+</div>
+
+<div id="empty">
+  <h1>Seu feed está vazio</h1>
+  <p>Adicione vídeos do seu aparelho. Eles ficam salvos só neste navegador e aparecem em ordem aleatória.</p>
+  <button id="emptyAddBtn">Adicionar vídeos</button>
+</div>
+
+<input type="file" id="fileInput" accept="video/*" multiple hidden>
+<div id="toast"></div>
+
+<script>
+(() => {
+  // ---------- IndexedDB ----------
+  const STORE = 'videos';
+  const dbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open('meu-feed', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: 'id' });
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+
+  function run(mode, action) {
+    return dbPromise.then(db => new Promise((resolve, reject) => {
+      const t = db.transaction(STORE, mode);
+      const req = action(t.objectStore(STORE));
+      t.oncomplete = () => resolve(req && req.result);
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error);
+    }));
+  }
+  const getAllIds = () => run('readonly', s => s.getAllKeys());
+  const getVideo = id => run('readonly', s => s.get(id));
+  const putVideo = v => run('readwrite', s => s.put(v));
+  const deleteVideo = id => run('readwrite', s => s.delete(id));
+
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+
+  // ---------- Estado ----------
+  const feedEl = document.getElementById('feed');
+  const counterEl = document.getElementById('counter');
+  const emptyEl = document.getElementById('empty');
+  const actionsEl = document.getElementById('actions');
+  const fileInput = document.getElementById('fileInput');
+  const toastEl = document.getElementById('toast');
+  const muteIcon = document.getElementById('muteIcon');
+
+  let ids = [];          // todos os vídeos salvos
+  let current = null;    // slide visível
+  let muted = true;      // navegadores só deixam autoplay sem som até o primeiro toque
+  const KEEP = 2;        // quantos slides vizinhos ficam carregados na memória
+
+  const ICON_MUTED = '<path d="M3 9v6h4l5 5V4L7 9H3zm13.6 3 2.7-2.7-1.4-1.4-2.7 2.7-2.7-2.7-1.4 1.4 2.7 2.7-2.7 2.7 1.4 1.4 2.7-2.7 2.7 2.7 1.4-1.4-2.7-2.7z"/>';
+  const ICON_SOUND = '<path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4zM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6z"/>';
+  const PLAY_SVG = '<svg class="paused-icon" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg>';
+
+  function shuffle(arr) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    clearTimeout(toast.t);
+    toast.t = setTimeout(() => toastEl.classList.remove('show'), 1800);
+  }
+
+  function updateMuteIcon() { muteIcon.innerHTML = muted ? ICON_MUTED : ICON_SOUND; }
+
+  // ---------- Slides ----------
+  function makeSlide(id) {
+    const slide = document.createElement('section');
+    slide.className = 'slide';
+    slide.dataset.id = id;
+    slide.innerHTML = '<video playsinline loop preload="auto"></video>' + PLAY_SVG +
+                      '<div class="progress"><div></div></div>';
+    const video = slide.querySelector('video');
+    const bar = slide.querySelector('.progress > div');
+    video.muted = muted;
+    video.addEventListener('loadedmetadata', () => {
+      video.classList.toggle('portrait', video.videoHeight >= video.videoWidth);
+    });
+    video.addEventListener('timeupdate', () => {
+      if (video.duration) bar.style.width = (video.currentTime / video.duration * 100) + '%';
+    });
+    slide.addEventListener('click', () => {
+      if (video.paused) { video.play().catch(() => {}); slide.classList.remove('paused'); }
+      else { video.pause(); slide.classList.add('paused'); }
+    });
+    observer.observe(slide);
+    return slide;
+  }
+
+  // Adiciona mais uma rodada embaralhada ao fim do feed (feed infinito)
+  function appendRound() {
+    if (!ids.length) return;
+    const round = shuffle(ids);
+    const last = feedEl.lastElementChild;
+    if (last && round.length > 1 && round[0] === last.dataset.id) {
+      [round[0], round[1]] = [round[1], round[0]];
+    }
+    for (const id of round) feedEl.appendChild(makeSlide(id));
+  }
+
+  async function load(slide) {
+    if (slide._url || slide._loading) return;
+    slide._loading = true;
+    try {
+      const rec = await getVideo(slide.dataset.id);
+      if (!rec || !slide.isConnected) return;
+      slide._url = URL.createObjectURL(rec.blob);
+      const video = slide.querySelector('video');
+      video.src = slide._url;
+      if (slide === current) playCurrent();
+    } finally {
+      slide._loading = false;
+    }
+  }
+
+  function unload(slide) {
+    if (!slide._url) return;
+    const video = slide.querySelector('video');
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    URL.revokeObjectURL(slide._url);
+    slide._url = null;
+  }
+
+  function playCurrent() {
+    if (!current) return;
+    const video = current.querySelector('video');
+    video.muted = muted;
+    current.classList.remove('paused');
+    video.play().catch(() => {
+      // autoplay com som bloqueado: tenta sem som
+      if (!video.muted) { muted = true; updateMuteIcon(); video.muted = true; video.play().catch(() => {}); }
+    });
+  }
+
+  function setCurrent(slide) {
+    if (current === slide) return;
+    if (current) current.querySelector('video').pause();
+    current = slide;
+    const slides = [...feedEl.children];
+    const idx = slides.indexOf(slide);
+    slides.forEach((s, i) => {
+      if (Math.abs(i - idx) <= KEEP) load(s); else unload(s);
+    });
+    const v = slide.querySelector('video');
+    v.currentTime = 0;
+    playCurrent();
+    counterEl.textContent = ids.length + (ids.length === 1 ? ' vídeo' : ' vídeos');
+    if (idx >= slides.length - 3) appendRound();
+  }
+
+  const observer = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (e.isIntersecting && e.intersectionRatio >= 0.6) setCurrent(e.target);
+    }
+  }, { root: feedEl, threshold: [0.6] });
+
+  function rebuild() {
+    for (const s of [...feedEl.children]) { observer.unobserve(s); unload(s); }
+    feedEl.innerHTML = '';
+    current = null;
+    const hasVideos = ids.length > 0;
+    emptyEl.classList.toggle('show', !hasVideos);
+    actionsEl.hidden = !hasVideos;
+    counterEl.textContent = '';
+    if (!hasVideos) return;
+    appendRound();
+    feedEl.scrollTop = 0;
+  }
+
+  // ---------- Ações ----------
+  async function addFiles(files) {
+    const list = [...files].filter(f => f.type.startsWith('video/') || /\.(mp4|mov|webm|m4v|mkv)$/i.test(f.name));
+    if (!list.length) return;
+    toast('Salvando ' + list.length + (list.length === 1 ? ' vídeo…' : ' vídeos…'));
+    let ok = 0;
+    for (const f of list) {
+      try {
+        const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+        await putVideo({ id, blob: f, name: f.name, added: Date.now() });
+        ok++;
+      } catch (err) {
+        console.error(err);
+        toast('Sem espaço para salvar "' + f.name + '"');
+        break;
+      }
+    }
+    ids = await getAllIds();
+    rebuild();
+    if (ok) toast(ok + (ok === 1 ? ' vídeo adicionado' : ' vídeos adicionados'));
+  }
+
+  async function deleteCurrent() {
+    if (!current) return;
+    if (!confirm('Apagar este vídeo do feed?')) return;
+    const id = current.dataset.id;
+    await deleteVideo(id);
+    ids = ids.filter(x => x !== id);
+    if (!ids.length) { rebuild(); return; }
+    const next = current.nextElementSibling;
+    for (const s of [...feedEl.querySelectorAll('.slide')]) {
+      if (s.dataset.id === id) { observer.unobserve(s); unload(s); s.remove(); }
+    }
+    current = null;
+    if (!feedEl.children.length) appendRound();
+    const target = (next && next.isConnected) ? next : feedEl.lastElementChild;
+    target.scrollIntoView({ behavior: 'instant', block: 'start' });
+    setCurrent(target);
+    toast('Vídeo apagado');
+  }
+
+  const pick = () => fileInput.click();
+  document.getElementById('addBtn').addEventListener('click', pick);
+  document.getElementById('emptyAddBtn').addEventListener('click', pick);
+  fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
+  document.getElementById('delBtn').addEventListener('click', deleteCurrent);
+  document.getElementById('muteBtn').addEventListener('click', () => {
+    muted = !muted;
+    updateMuteIcon();
+    if (current) current.querySelector('video').muted = muted;
+  });
+
+  // Teclado no computador
+  document.addEventListener('keydown', e => {
+    if (!current) return;
+    if (e.key === 'ArrowDown' || e.key === 'j') {
+      e.preventDefault();
+      (current.nextElementSibling || current).scrollIntoView({ behavior: 'smooth' });
+    } else if (e.key === 'ArrowUp' || e.key === 'k') {
+      e.preventDefault();
+      (current.previousElementSibling || current).scrollIntoView({ behavior: 'smooth' });
+    } else if (e.key === ' ') {
+      e.preventDefault(); current.click();
+    } else if (e.key === 'm') {
+      document.getElementById('muteBtn').click();
+    }
+  });
+
+  // Arrastar e soltar vídeos no computador
+  document.addEventListener('dragover', e => e.preventDefault());
+  document.addEventListener('drop', e => { e.preventDefault(); addFiles(e.dataTransfer.files); });
+
+  // ---------- Início ----------
+  updateMuteIcon();
+  getAllIds().then(list => { ids = list; rebuild(); })
+    .catch(err => { console.error(err); toast('Este navegador bloqueou o armazenamento local'); });
+})();
+</script>
+</body>
+</html>
