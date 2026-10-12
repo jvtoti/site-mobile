@@ -442,11 +442,12 @@
   // Fica em silêncio com o vídeo pausado ou na luz vermelha.
   const metroBtn = document.getElementById('metroBtn');
   const levelLabel = document.getElementById('levelLabel');
+  // weight = chance de ser sorteado (somam 100)
   const LEVELS = [
-    { name: 'Fácil', bpm: 60 },
-    { name: 'Médio', bpm: 90 },
-    { name: 'Difícil', bpm: 130 },
-    { name: 'Expert', bpm: 180 },
+    { name: 'Fácil', bpm: 100, weight: 10 },
+    { name: 'Médio', bpm: 150, weight: 20 },
+    { name: 'Difícil', bpm: 200, weight: 35 },
+    { name: 'Expert', bpm: 260, weight: 35 },
   ];
   const LEVEL_SECS = 10;
   const metro = { on: false, ac: null, timer: null, levelTimer: null, level: null, next: null, pending: [] };
@@ -496,7 +497,8 @@
   }
 
   function drawLevel() {
-    metro.level = LEVELS[Math.floor(Math.random() * LEVELS.length)];
+    let r = Math.random() * LEVELS.reduce((sum, l) => sum + l.weight, 0);
+    metro.level = LEVELS.find(l => (r -= l.weight) < 0) || LEVELS[LEVELS.length - 1];
     levelLabel.textContent = metro.level.name;
   }
 
