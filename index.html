@@ -50,9 +50,6 @@
     color: #fff; cursor: pointer; text-shadow: 0 1px 3px rgba(0,0,0,.7); padding: 0 4px; }
   .btn:active { transform: scale(.9); }
 
-  .counter { position: fixed; top: calc(env(safe-area-inset-top) + 14px); left: 0; right: 0;
-    text-align: center; font-size: 14px; font-weight: 600; opacity: .7; z-index: 10;
-    pointer-events: none; text-shadow: 0 1px 3px rgba(0,0,0,.6); }
 
   #empty { position: fixed; inset: 0; display: none; flex-direction: column; gap: 18px;
     align-items: center; justify-content: center; text-align: center; padding: 24px; }
@@ -62,19 +59,13 @@
   #empty button { background: #fe2c55; color: #fff; border: 0; border-radius: 8px;
     padding: 14px 28px; font-size: 16px; font-weight: 600; cursor: pointer; }
 
-  /* Red light / green light: borda colorida e aviso no topo */
+  /* Red light / green light: borda colorida */
   #light { position: fixed; inset: 0; pointer-events: none; z-index: 5; opacity: 0;
     transition: opacity .25s ease, box-shadow .25s ease; }
   #light.show { opacity: 1; }
   #light.green { box-shadow: inset 0 0 0 6px #22c55e, inset 0 0 80px rgba(34,197,94,.55); }
   #light.red { box-shadow: inset 0 0 0 6px #ef4444, inset 0 0 120px rgba(239,68,68,.75); }
-  #light .badge { position: absolute; top: calc(env(safe-area-inset-top) + 44px); left: 50%;
-    transform: translateX(-50%); padding: 8px 18px; border-radius: 999px; font-weight: 800;
-    font-size: 18px; letter-spacing: .04em; color: #fff; white-space: nowrap; }
-  #light.green .badge { background: #16a34a; }
-  #light.red .badge { background: #dc2626; animation: pulse .8s ease-in-out infinite alternate; }
   #light.flash { animation: flash .35s ease-out; }
-  @keyframes pulse { from { transform: translateX(-50%) scale(1); } to { transform: translateX(-50%) scale(1.08); } }
   @keyframes flash { from { background: rgba(255,255,255,.35); } to { background: transparent; } }
 
   #toast { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
@@ -86,8 +77,6 @@
 <body>
 
 <div id="feed"></div>
-
-<div class="counter" id="counter"></div>
 
 <div class="actions" id="actions" hidden>
   <button class="btn" id="lightBtn" title="Red light / green light">
@@ -117,7 +106,7 @@
 </div>
 
 <input type="file" id="fileInput" accept="video/*" multiple hidden>
-<div id="light"><div class="badge"></div></div>
+<div id="light"></div>
 <div id="toast"></div>
 
 <script>
@@ -159,7 +148,6 @@
 
   // ---------- Estado ----------
   const feedEl = document.getElementById('feed');
-  const counterEl = document.getElementById('counter');
   const emptyEl = document.getElementById('empty');
   const actionsEl = document.getElementById('actions');
   const fileInput = document.getElementById('fileInput');
@@ -168,7 +156,9 @@
 
   let ids = [];          // todos os vídeos salvos
   let current = null;    // slide visível
-  let muted = true;      // navegadores só deixam autoplay sem som até o primeiro toque
+  let muted = false;     // preferência: vídeos começam com som
+  let swallowTap = false;
+  let soundBlocked = false; // navegador bloqueou o som até o primeiro toque na tela
   const KEEP = 2;        // quantos slides vizinhos ficam carregados na memória
 
   const ICON_MUTED = '<path d="M3 9v6h4l5 5V4L7 9H3zm13.6 3 2.7-2.7-1.4-1.4-2.7 2.7-2.7-2.7-1.4 1.4 2.7 2.7-2.7 2.7 1.4 1.4 2.7-2.7 2.7 2.7 1.4-1.4-2.7-2.7z"/>';
@@ -191,7 +181,7 @@
     toast.t = setTimeout(() => toastEl.classList.remove('show'), 1800);
   }
 
-  function updateMuteIcon() { muteIcon.innerHTML = muted ? ICON_MUTED : ICON_SOUND; }
+  function updateMuteIcon() { muteIcon.innerHTML = (muted || soundBlocked) ? ICON_MUTED : ICON_SOUND; }
 
   const slides = () => feedEl.children;
   const indexOf = slide => Array.prototype.indexOf.call(slides(), slide);
@@ -215,6 +205,7 @@
     });
     slide.addEventListener('click', () => {
       if (slide !== current) return;
+      if (swallowTap) { swallowTap = false; return; }
       if (video.paused) { playCurrent(); }
       else { video.pause(); slide.classList.add('paused'); }
     });
@@ -272,16 +263,32 @@
   function playCurrent() {
     if (!current) return;
     const video = current._video;
-    video.muted = muted;
+    video.muted = muted || soundBlocked;
     current.classList.remove('paused');
     if (!video.src) return; // começa quando terminar de carregar
     video.play().catch(() => {
-      // autoplay com som bloqueado: tenta sem som
+      // Navegador bloqueou o som antes de qualquer toque: toca mudo e
+      // liga o som no primeiro toque na tela
       if (!video.muted) {
-        muted = true; updateMuteIcon(); video.muted = true;
+        soundBlocked = true; updateMuteIcon(); video.muted = true;
         video.play().catch(() => {});
       }
     });
+  }
+
+  function unlockSound(e) {
+    if (!soundBlocked || (e.target.closest && e.target.closest('#muteBtn'))) return;
+    soundBlocked = false;
+    updateMuteIcon();
+    if (current && !muted) current._video.muted = false;
+    // Esse toque só liga o som: não pausa o vídeo
+    if (e.target.closest && e.target.closest('.slide')) {
+      swallowTap = true;
+      setTimeout(() => { swallowTap = false; }, 600);
+    }
+  }
+  for (const type of ['pointerdown', 'touchend', 'keydown']) {
+    document.addEventListener(type, unlockSound, { capture: true });
   }
 
   function setCurrent(slide) {
@@ -297,7 +304,6 @@
     if (slide._video.src && slide._video.currentTime > 0.05) slide._video.currentTime = 0;
     playCurrent();
     metroOnSlide(slide);
-    counterEl.textContent = ids.length + (ids.length === 1 ? ' vídeo' : ' vídeos');
   }
 
   // Rola suavemente até o slide i
@@ -354,7 +360,6 @@
     const hasVideos = ids.length > 0;
     emptyEl.classList.toggle('show', !hasVideos);
     actionsEl.hidden = !hasVideos;
-    counterEl.textContent = '';
     if (!hasVideos) return;
     appendRound();
     feedEl.scrollTo({ top: 0, behavior: 'instant' });
@@ -618,7 +623,6 @@
   // A troca acontece em tempos aleatórios, com aviso sonoro e vibração.
   const lightBtn = document.getElementById('lightBtn');
   const lightEl = document.getElementById('light');
-  const lightBadge = lightEl.querySelector('.badge');
   const game = { on: false, phase: null, timer: null };
   const GREEN_SECS = [8, 30];   // duração aleatória do verde (s)
   const RED_SECS = [4, 15];     // duração aleatória do vermelho (s)
@@ -649,7 +653,6 @@
     lightEl.className = 'show ' + phase;
     void lightEl.offsetWidth; // reinicia a animação do flash
     lightEl.classList.add('flash');
-    lightBadge.textContent = phase === 'green' ? 'LUZ VERDE · VAI' : 'LUZ VERMELHA · PARA';
     if (phase === 'red') stopClicks();
     cue(phase);
     clearTimeout(game.timer);
@@ -719,7 +722,8 @@
   fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
   document.getElementById('delBtn').addEventListener('click', deleteCurrent);
   document.getElementById('muteBtn').addEventListener('click', () => {
-    muted = !muted;
+    if (soundBlocked) { soundBlocked = false; muted = false; } // ícone mostrava mudo: liga o som
+    else muted = !muted;
     updateMuteIcon();
     if (current) current._video.muted = muted;
   });
