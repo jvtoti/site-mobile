@@ -46,8 +46,8 @@
   .btn.add { background: #fe2c55; }
   .btn.on { background: #25f4ee; color: #000; }
   .metro { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-  .bpm { font-size: 12px; font-weight: 700; min-height: 15px; border: 0; background: none;
-    color: #fff; cursor: pointer; text-shadow: 0 1px 3px rgba(0,0,0,.7); padding: 0 4px; }
+  .bpm { font-size: 12px; font-weight: 700; min-height: 15px; color: #fff;
+    text-shadow: 0 1px 3px rgba(0,0,0,.7); padding: 0 4px; pointer-events: none; }
   .btn:active { transform: scale(.9); }
 
   .counter { position: fixed; top: calc(env(safe-area-inset-top) + 14px); left: 0; right: 0;
@@ -79,7 +79,7 @@
     <button class="btn" id="metroBtn" title="Metrônomo">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3h5L19 21H5L9.5 3z"/><path d="M12 16 17 6"/><path d="M7.5 16h9"/></svg>
     </button>
-    <button class="bpm" id="bpmLabel" title="Toque para dobrar ou dividir o BPM"></button>
+    <div class="bpm" id="bpmLabel"></div>
   </div>
   <button class="btn" id="muteBtn" title="Som">
     <svg id="muteIcon" viewBox="0 0 24 24" fill="currentColor"></svg>
@@ -333,11 +333,11 @@
   }
 
   // ---------- Metrônomo ----------
-  // Detecta o BPM a partir do áudio do vídeo e toca cliques sincronizados com ele.
+  // Detecta cada batida (ataque do bumbo/percussão) no áudio do vídeo e toca um clique nela.
   const metroBtn = document.getElementById('metroBtn');
   const bpmLabel = document.getElementById('bpmLabel');
-  const metro = { on: false, ac: null, timer: null, nextBeat: null, pending: [] };
-  const beatInfo = new Map();   // id -> { bpm, offset, mult } | { error }
+  const metro = { on: false, ac: null, timer: null, nextHit: null, pending: [] };
+  const beatInfo = new Map();   // id -> { hits: [segundos], bpm } | { error }
   const beatJobs = new Map();   // id -> Promise da análise em andamento
   const MAX_ANALYZE_BYTES = 400 * 1024 * 1024;
 
@@ -358,10 +358,10 @@
     });
   }
 
-  // Estima BPM e a posição da primeira batida (em segundos)
-  function detectTempo(audio) {
+  // Encontra os instantes das batidas e estima o BPM (só para mostrar)
+  function detectBeats(audio) {
     const sr = audio.sampleRate;
-    const len = Math.min(audio.length, Math.floor(sr * 90)); // até 90 s bastam
+    const len = Math.min(audio.length, Math.floor(sr * 600)); // até 10 min
     const chs = audio.numberOfChannels;
     const mono = new Float32Array(len);
     for (let c = 0; c < chs; c++) {
@@ -369,11 +369,11 @@
       for (let i = 0; i < len; i++) mono[i] += d[i] / chs;
     }
 
-    // Duas faixas: graves (bumbo) e agudos (caixa/chimbal), energia a cada 10 ms
+    // Duas faixas: graves (bumbo) e agudos (caixa/chimbal); volume (RMS) em janelas de 30 ms a cada 10 ms
     const hop = Math.round(sr * 0.01);
     const frames = Math.floor(len / hop);
-    if (frames < 400) throw new Error('curto');
-    const lowE = new Float32Array(frames), highE = new Float32Array(frames);
+    if (frames < 100) throw new Error('curto');
+    const lowS = new Float32Array(frames), highS = new Float32Array(frames);
     const a = Math.exp(-2 * Math.PI * 150 / sr); // passa-baixa ~150 Hz
     let lp = 0, prev = 0;
     for (let f = 0; f < frames; f++) {
@@ -384,8 +384,14 @@
         const hp = x - prev; prev = x;
         el += lp * lp; eh += hp * hp;
       }
-      lowE[f] = Math.log(1e-10 + el);
-      highE[f] = Math.log(1e-10 + eh);
+      lowS[f] = el; highS[f] = eh;
+    }
+    const lowE = new Float32Array(frames), highE = new Float32Array(frames);
+    for (let f = 0; f < frames; f++) {
+      const g0 = Math.max(0, f - 1), g1 = Math.min(frames - 1, f + 1);
+      let sl = 0, sh = 0;
+      for (let g = g0; g <= g1; g++) { sl += lowS[g]; sh += highS[g]; }
+      lowE[f] = Math.sqrt(sl); highE[f] = Math.sqrt(sh);
     }
 
     // Força dos ataques: aumento de energia em cada faixa, normalizado e sem a média local
@@ -411,6 +417,27 @@
     // Bumbo marca o tempo; agudos ajudam, mas costumam cair no contratempo
     const onset = new Float32Array(frames), beatO = new Float32Array(frames);
     for (let f = 0; f < frames; f++) beatO[f] = lowO[f] + 0.2 * highO[f];
+    // Batidas: picos fortes dos ataques (sobretudo graves), com pelo menos 100 ms entre eles
+    const sorted = Float32Array.from(beatO).sort();
+    const ref = sorted[Math.floor(frames * 0.995)] || sorted[frames - 1];
+    const hits = [];
+    if (ref > 0) {
+      const thr = 0.3 * ref;
+      let last = -Infinity;
+      for (let f = 0; f < frames; f++) {
+        const v = beatO[f];
+        if (v < thr) continue;
+        let peak = true;
+        for (let j = -4; j <= 4 && peak; j++) if (j && beatO[f + j] > v) peak = false;
+        if (!peak) continue;
+        const t = (f + 1) * hop / sr; // +1 quadro: o ataque é detectado no início do quadro
+        if (t - last < 0.1) continue;
+        hits.push(Math.round(t * 1000) / 1000);
+        last = t;
+      }
+    }
+    if (hits.length < 2) throw new Error('sem batida');
+
     // Espalha cada pico por ±2 quadros: tempos que não caem em múltiplos de 10 ms não se perdem
     const K = [1, 2, 3, 2, 1];
     for (let f = 0; f < frames; f++) {
@@ -437,7 +464,7 @@
       const score = (ac[L] + 0.5 * (ac[2 * L] || 0)) * prior;
       if (score > bestScore) { bestScore = score; best = L; }
     }
-    if (!(bestScore > 0)) throw new Error('sem ritmo');
+    if (!(bestScore > 0)) return { hits, bpm: null };
     // Refina período e fase juntos: a grade de batidas que mais coincide com os ataques
     const beatS = new Float32Array(frames);
     for (let f = 0; f < frames; f++) {
@@ -458,8 +485,7 @@
         if (sum > bestSum) { bestSum = sum; period = P; phase = ph; }
       }
     }
-    // +1 quadro: o ataque é detectado no início do quadro de 10 ms
-    return { bpm: Math.round(6000 / period * 100) / 100, offset: (phase + 1) * hop / sr };
+    return { hits, bpm: Math.round(6000 / period) };
   }
 
   function analyze(id) {
@@ -467,13 +493,14 @@
     if (beatJobs.has(id)) return beatJobs.get(id);
     const job = (async () => {
       let info = await getBeat(id).catch(() => null);
+      if (info && !info.hits && !info.error) info = null; // análise antiga (só BPM): refaz
       if (!info) {
         try {
           const rec = await getVideo(id);
           if (!rec) throw new Error('apagado');
           if (rec.blob.size > MAX_ANALYZE_BYTES) throw new Error('grande');
           const audio = await decodeAudio(await rec.blob.arrayBuffer());
-          info = { id, ...detectTempo(audio), mult: 1 };
+          info = { id, ...detectBeats(audio) };
           putBeat(info).catch(() => {});
         } catch (err) {
           console.warn('BPM:', err);
@@ -493,21 +520,21 @@
     if (!metro.on || !current) { bpmLabel.textContent = ''; return; }
     const info = beatInfo.get(current.dataset.id);
     if (!info) bpmLabel.textContent = '…';
-    else if (info.error) bpmLabel.textContent = 'sem ritmo';
-    else bpmLabel.textContent = Math.round(info.bpm * info.mult) + ' BPM';
+    else if (info.error) bpmLabel.textContent = 'sem batida';
+    else bpmLabel.textContent = info.bpm ? '~' + info.bpm + ' BPM' : '♪';
   }
 
   function stopClicks() {
     const now = metro.ac ? metro.ac.currentTime : 0;
     for (const o of metro.pending) { try { if (o.t > now) o.osc.stop(); } catch (e) {} }
     metro.pending = [];
-    metro.nextBeat = null;
+    metro.nextHit = null;
   }
 
-  function click(when, accent) {
+  function click(when) {
     const ac = metro.ac;
     const osc = ac.createOscillator(), gain = ac.createGain();
-    osc.frequency.value = accent ? 1600 : 1000;
+    osc.frequency.value = 1200;
     gain.gain.setValueAtTime(0.0001, when);
     gain.gain.exponentialRampToValueAtTime(0.7, when + 0.002);
     gain.gain.exponentialRampToValueAtTime(0.0001, when + 0.06);
@@ -517,27 +544,28 @@
     metro.pending.push({ osc, t: when });
   }
 
-  // Agenda os cliques dos próximos ~150 ms com base no tempo do vídeo
+  // Agenda os cliques das batidas dos próximos ~150 ms com base no tempo do vídeo
   function scheduleClicks() {
     if (!metro.on || !current || !metro.ac) return;
     const v = current._video;
     const info = beatInfo.get(current.dataset.id);
     if (!info || info.error || v.paused || v.seeking || v.readyState < 3) { stopClicks(); return; }
-    const ac = metro.ac;
+    const ac = metro.ac, hits = info.hits;
     metro.pending = metro.pending.filter(o => o.t > ac.currentTime - 0.1);
-    const period = 60 / (info.bpm * info.mult);
     const now = v.currentTime, rate = v.playbackRate || 1;
-    const first = Math.ceil((now - info.offset) / period - 1e-6);
-    let k = metro.nextBeat;
-    if (k == null || k < first - 1 || k > first + 2) k = first; // pulou/voltou: ressincroniza
-    for (;;) {
-      const t = info.offset + k * period;
-      if (t > now + 0.15) break;
-      const when = ac.currentTime + (t - now) / rate;
-      if (when >= ac.currentTime - 0.005) click(Math.max(when, ac.currentTime), ((k % 4) + 4) % 4 === 0);
-      k++;
+    let i = metro.nextHit;
+    // Primeira vez ou o vídeo pulou/voltou: procura a próxima batida a partir de agora
+    if (i == null || (i > 0 && hits[i - 1] > now + 0.2) || (i < hits.length && hits[i] < now - 0.2)) {
+      let lo = 0, hi = hits.length;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (hits[m] < now) lo = m + 1; else hi = m; }
+      i = lo;
     }
-    metro.nextBeat = k;
+    while (i < hits.length && hits[i] <= now + 0.15) {
+      const when = ac.currentTime + (hits[i] - now) / rate;
+      if (when >= ac.currentTime - 0.005) click(Math.max(when, ac.currentTime));
+      i++;
+    }
+    metro.nextHit = i;
   }
 
   // Ao trocar de vídeo: zera os cliques e analisa este e o próximo
@@ -563,17 +591,6 @@
       stopClicks();
       updateBpmLabel();
     }
-  });
-
-  // Corrige quando o BPM sai pela metade ou em dobro: 1× → 2× → ½× → 1×
-  bpmLabel.addEventListener('click', () => {
-    if (!current) return;
-    const info = beatInfo.get(current.dataset.id);
-    if (!info || info.error) return;
-    info.mult = info.mult === 1 ? 2 : info.mult === 2 ? 0.5 : 1;
-    putBeat(info).catch(() => {});
-    stopClicks();
-    updateBpmLabel();
   });
 
   // ---------- Ações ----------
