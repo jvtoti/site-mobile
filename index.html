@@ -25,6 +25,8 @@
   .slide video { width: 100%; height: 100%; object-fit: contain; display: block;
     pointer-events: none; }
   .slide video.portrait { object-fit: cover; }
+  .slide video.player { position: absolute; inset: 0; opacity: 0; }
+  .slide video.player.ready { opacity: 1; }
   @media (min-aspect-ratio: 3/4) { .slide video.portrait { object-fit: contain; } }
 
   .paused-icon { position: absolute; inset: 0; margin: auto; width: 84px; height: 84px;
@@ -193,23 +195,81 @@
     slide.dataset.id = id;
     slide.innerHTML = '<video playsinline muted preload="auto"></video>' + PLAY_SVG +
                       '<div class="progress"><div></div></div>';
-    const video = slide.querySelector('video');
+    const video = slide.querySelector('video'); // prévia muda (primeiro quadro)
     slide._video = video;
     slide._bar = slide.querySelector('.progress > div');
     video.addEventListener('loadedmetadata', () => {
       video.classList.toggle('portrait', video.videoHeight >= video.videoWidth);
     });
-    // Terminou: vai para o próximo vídeo
-    video.addEventListener('ended', () => {
-      if (slide === current) goTo(indexOf(slide) + 1);
-    });
     slide.addEventListener('click', () => {
       if (slide !== current) return;
       if (swallowTap) { swallowTap = false; return; }
-      if (video.paused) { playCurrent(); }
-      else { video.pause(); slide.classList.add('paused'); }
+      if (player.paused) { playCurrent(); }
+      else { player.pause(); slide.classList.add('paused'); }
     });
     return slide;
+  }
+
+  // Dois players com som que se revezam: um toca o vídeo atual e o outro já
+  // fica carregado no próximo, pausado no início. Ao terminar, só troca de
+  // player e o próximo começa na hora. Depois do primeiro toque o navegador
+  // libera o som desses elementos (cada <video> novo nasceria bloqueado).
+  function makePlayer() {
+    const v = document.createElement('video');
+    v.className = 'player';
+    v.setAttribute('playsinline', '');
+    v.preload = 'auto';
+    v.addEventListener('loadedmetadata', () => {
+      v.classList.toggle('portrait', v.videoHeight >= v.videoWidth);
+    });
+    // Só aparece por cima da prévia quando já tem imagem: sem piscar preto
+    v.addEventListener('loadeddata', () => v.classList.add('ready'));
+    // Terminou: começa o próximo imediatamente
+    v.addEventListener('ended', () => {
+      if (v === player && current) goTo(indexOf(current) + 1);
+    });
+    return v;
+  }
+  let player = makePlayer();   // toca o vídeo atual
+  let standby = makePlayer();  // pré-carregado no próximo vídeo
+
+  function mount(v, slide) {
+    if (v.parentNode !== slide) {
+      v.classList.remove('ready');
+      slide.insertBefore(v, slide._video.nextSibling);
+    }
+    if (v._url !== slide._url) {
+      v.classList.remove('ready');
+      v._url = slide._url;
+      v.src = slide._url;
+    }
+  }
+
+  function attachPlayer(slide) {
+    if (!slide._url) return false;
+    // O próximo já está pronto no player reserva: troca os papéis
+    if (player._url !== slide._url && standby._url === slide._url) {
+      [player, standby] = [standby, player];
+      standby.pause();
+    }
+    mount(player, slide);
+    if (player.currentTime > 0.05) player.currentTime = 0;
+    preloadNext();
+    return true;
+  }
+
+  // Deixa o player reserva carregado e com o primeiro quadro pronto no próximo vídeo
+  function preloadNext() {
+    const next = current && current.nextElementSibling;
+    if (!next || !next._url || (standby._url === next._url && standby.parentNode === next)) return;
+    const v = standby;
+    v.pause();
+    mount(v, next);
+    v.muted = true;
+    const p = v.play();
+    if (p) p.then(() => {
+      if (v !== player) { v.pause(); v.currentTime = 0; }
+    }).catch(() => {});
   }
 
   // Adiciona mais uma rodada embaralhada ao fim do feed (feed infinito)
@@ -234,7 +294,9 @@
       slide._url = URL.createObjectURL(rec.blob);
       // #t=0.001 faz o Safari mostrar o primeiro quadro em vez de tela preta
       slide._video.src = slide._url + '#t=0.001';
-      if (slide === current) playCurrent(); else prime(slide);
+      prime(slide);
+      if (slide === current && attachPlayer(slide)) playCurrent();
+      else if (current && slide === current.nextElementSibling) preloadNext();
     } finally {
       slide._loading = false;
     }
@@ -246,11 +308,14 @@
     const v = slide._video;
     v.muted = true;
     const p = v.play();
-    if (p) p.then(() => { if (slide !== current) v.pause(); }).catch(() => {});
+    if (p) p.then(() => v.pause()).catch(() => {});
   }
 
   function unload(slide) {
     if (!slide._url) return;
+    for (const v of [player, standby]) {
+      if (v._url === slide._url) { v.pause(); v.removeAttribute('src'); v._url = null; }
+    }
     const video = slide._video;
     video.pause();
     video.removeAttribute('src');
@@ -262,10 +327,10 @@
 
   function playCurrent() {
     if (!current) return;
-    const video = current._video;
+    const video = player;
     video.muted = muted || soundBlocked;
     current.classList.remove('paused');
-    if (!video.src) return; // começa quando terminar de carregar
+    if (player.parentNode !== current || !video.src) return; // começa quando terminar de carregar
     video.play().catch(() => {
       // Navegador bloqueou o som antes de qualquer toque: toca mudo e
       // liga o som no primeiro toque na tela
@@ -280,7 +345,15 @@
     if (!soundBlocked || (e.target.closest && e.target.closest('#muteBtn'))) return;
     soundBlocked = false;
     updateMuteIcon();
-    if (current && !muted) current._video.muted = false;
+    if (!muted) player.muted = false;
+    // play() dentro do toque libera o som dos dois players para os próximos vídeos
+    if (current && player.parentNode === current && !current.classList.contains('paused')) {
+      player.play().catch(() => {});
+    }
+    if (standby.src) {
+      const v = standby;
+      v.play().then(() => { if (v !== player) { v.pause(); v.currentTime = 0; } }).catch(() => {});
+    }
     // Esse toque só liga o som: não pausa o vídeo
     if (e.target.closest && e.target.closest('.slide')) {
       swallowTap = true;
@@ -293,7 +366,7 @@
 
   function setCurrent(slide) {
     if (!slide || current === slide) return;
-    if (current) { current._video.pause(); current._video.muted = true; }
+    player.pause();
     current = slide;
     const all = slides();
     const idx = indexOf(slide);
@@ -301,8 +374,7 @@
     for (let i = 0; i < all.length; i++) {
       if (Math.abs(i - idx) <= KEEP) load(all[i]); else unload(all[i]);
     }
-    if (slide._video.src && slide._video.currentTime > 0.05) slide._video.currentTime = 0;
-    playCurrent();
+    if (attachPlayer(slide)) playCurrent();
     metroOnSlide(slide);
   }
 
@@ -312,8 +384,9 @@
     while (i >= slides().length) appendRound();
     const target = slides()[i];
     load(target);
+    // Começa o vídeo na hora; a rolagem acompanha
+    setCurrent(target);
     feedEl.scrollTo({ top: target.offsetTop, behavior: smooth ? 'smooth' : 'instant' });
-    if (!smooth) setCurrent(target);
   }
 
   // Só troca de vídeo quando a rolagem termina (evita trocas no meio do gesto)
@@ -335,8 +408,8 @@
   // Barra de progresso suave (a cada quadro, só do vídeo atual)
   (function tick() {
     if (current) {
-      const v = current._video;
-      if (v.duration) current._bar.style.transform = 'scaleX(' + (v.currentTime / v.duration) + ')';
+      const v = player;
+      if (v.duration && player.parentNode === current) current._bar.style.transform = 'scaleX(' + (v.currentTime / v.duration) + ')';
     }
     requestAnimationFrame(tick);
   })();
@@ -349,11 +422,12 @@
   // Pausa quando sai do app/aba e retoma ao voltar
   document.addEventListener('visibilitychange', () => {
     if (!current) return;
-    if (document.hidden) current._video.pause();
+    if (document.hidden) player.pause();
     else if (!current.classList.contains('paused')) playCurrent();
   });
 
   function rebuild() {
+    for (const v of [player, standby]) { v.pause(); v.removeAttribute('src'); v._url = null; }
     for (const s of [...slides()]) unload(s);
     feedEl.innerHTML = '';
     current = null;
@@ -562,9 +636,9 @@
   // Agenda os cliques dos próximos ~150 ms na grade fixa do BPM, com base no tempo do vídeo
   function scheduleClicks() {
     if (!metro.on || !current || !metro.ac) return;
-    const v = current._video;
+    const v = player;
     const info = beatInfo.get(current.dataset.id);
-    if (!info || info.error || v.paused || v.seeking || v.readyState < 3 || game.phase === 'red') { stopClicks(); return; }
+    if (!info || info.error || v.parentNode !== current || v.paused || v.seeking || v.readyState < 3 || game.phase === 'red') { stopClicks(); return; }
     const ac = metro.ac;
     metro.pending = metro.pending.filter(o => o.t > ac.currentTime - 0.1);
     const period = 60 / (info.bpm * info.mult);
@@ -725,7 +799,7 @@
     if (soundBlocked) { soundBlocked = false; muted = false; } // ícone mostrava mudo: liga o som
     else muted = !muted;
     updateMuteIcon();
-    if (current) current._video.muted = muted;
+    player.muted = muted;
   });
 
   // Teclado no computador
