@@ -241,11 +241,21 @@
       const rec = await getVideo(slide.dataset.id);
       if (!rec || !slide.isConnected || slide._url) return;
       slide._url = URL.createObjectURL(rec.blob);
-      slide._video.src = slide._url;
-      if (slide === current) playCurrent();
+      // #t=0.001 faz o Safari mostrar o primeiro quadro em vez de tela preta
+      slide._video.src = slide._url + '#t=0.001';
+      if (slide === current) playCurrent(); else prime(slide);
     } finally {
       slide._loading = false;
     }
+  }
+
+  // Deixa o primeiro quadro já desenhado: toca um instante sem som e pausa.
+  // Celulares só decodificam a imagem depois do play, por isso a tela preta.
+  function prime(slide) {
+    const v = slide._video;
+    v.muted = true;
+    const p = v.play();
+    if (p) p.then(() => { if (slide !== current) v.pause(); }).catch(() => {});
   }
 
   function unload(slide) {
@@ -284,7 +294,7 @@
     for (let i = 0; i < all.length; i++) {
       if (Math.abs(i - idx) <= KEEP) load(all[i]); else unload(all[i]);
     }
-    if (slide._video.src) slide._video.currentTime = 0;
+    if (slide._video.src && slide._video.currentTime > 0.05) slide._video.currentTime = 0;
     playCurrent();
     metroOnSlide(slide);
     counterEl.textContent = ids.length + (ids.length === 1 ? ' vídeo' : ' vídeos');
