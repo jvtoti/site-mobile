@@ -694,14 +694,14 @@
 
   // ---------- Red light / green light ----------
   // Verde: vai (metrônomo toca). Vermelho: para (metrônomo em silêncio).
-  // A cada rodada sorteia a cor (70% verde, 30% vermelho) e depois quanto tempo ela dura;
+  // A cada rodada sorteia a cor (60% verde, 40% vermelho) e depois quanto tempo ela dura;
   // acabou o tempo, sorteia tudo de novo. Aviso sonoro e vibração quando a cor muda.
   const lightBtn = document.getElementById('lightBtn');
   const lightEl = document.getElementById('light');
   const game = { on: false, phase: null, timer: null };
   const GREEN_SECS = [8, 30];   // duração aleatória do verde (s)
   const RED_SECS = [4, 15];     // duração aleatória do vermelho (s)
-  const GREEN_CHANCE = 0.7;     // probabilidade de sortear verde
+  const GREEN_CHANCE = 0.6;     // probabilidade de sortear verde
 
   const rand = ([min, max]) => min + Math.random() * (max - min);
 
